@@ -130,9 +130,14 @@ def check_ref_model_version(config: Config) -> None:
                 timeout=5,
             )
             version = result.stdout.strip()
-            if version != REQUIRED_SAIL_VERSION:
+            try:
+                version_parts = tuple(int(part) for part in version.split("."))
+                required_parts = tuple(int(part) for part in REQUIRED_SAIL_VERSION.split("."))
+            except ValueError:
+                raise RuntimeError(f"Unable to parse Sail version from: {version!r}")
+            if version_parts < required_parts:
                 raise ValueError(
-                    f"Sail reference model version mismatch. ACT4 requires version {REQUIRED_SAIL_VERSION}, but {version} was found. "
+                    f"Sail reference model version mismatch. ACT4 requires version {REQUIRED_SAIL_VERSION} or later, but {version} was found. "
                     "Refer to the ACT4 README for installation instructions: https://github.com/riscv/riscv-arch-test/tree/act4?tab=readme-ov-file#4-risc-v-sail-reference-model",
                 )
         except subprocess.CalledProcessError as e:

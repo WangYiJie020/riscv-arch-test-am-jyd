@@ -11,6 +11,12 @@
 CONFIG_FILES ?= config/spike/spike-rv32-max/test_config.yaml config/spike/spike-rv64-max/test_config.yaml
 COVERAGE_CONFIG_FILES ?= config/sail/sail-rv64-max/test_config.yaml config/sail/sail-rv32-max/test_config.yaml
 
+# Abstract-Machine compatibility options. These intentionally mirror the old
+# riscv-arch-test-am workflow.
+TEST_ISA ?= I M
+ALL ?=
+EXCLUDE_TEST ?=
+
 # WORKDIR is where all of the generated files are created
 WORKDIR     ?= work
 
@@ -161,6 +167,16 @@ clean-tests:
 	rm -rf $(SRCDIR64) $(SRCDIR32) $(SRCDIR64E) $(SRCDIR32E)
 	rm -rf $(UNPRIV_COVERPOINTS_DIR) $(COVERAGE_HELPERS_DIR)
 	rm -rf $(STAMP_DIR)
+
+
+
+########## Abstract-Machine compatibility ##########
+.PHONY: run image gdb clean-am
+run image gdb:
+	@./scripts/am_compat.py $@ --arch "$(ARCH)" --test-isa "$(TEST_ISA)" --all "$(ALL)" --exclude-test "$(EXCLUDE_TEST)"
+
+clean-am:
+	@./scripts/am_compat.py clean-am --arch "$(ARCH)"
 
 
 
