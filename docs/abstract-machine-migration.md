@@ -24,14 +24,17 @@ sail_riscv_sim
 
 ## Commands
 
-The old command shape is preserved for the first supported target,
-`riscv32-jyd`:
+The old command shape is preserved for the supported Abstract-Machine targets:
 
 ```sh
 make ARCH=riscv32-jyd run
 make ARCH=riscv32-jyd TEST_ISA=I ALL=add-00 run
 make ARCH=riscv32-jyd TEST_ISA="I M" ALL="add-00 mul-00" run
 make ARCH=riscv32-jyd clean-am
+
+make ARCH=riscv32-nemu run
+make ARCH=riscv32-nemu TEST_ISA=I ALL=add-00 run
+make ARCH=riscv32-nemu clean-am
 ```
 
 `TEST_ISA` is a whitespace-separated list of extension directories under
@@ -69,8 +72,8 @@ still produced by the JYD AM platform rules.
 
 ## Current Scope
 
-The implemented compatibility target is `riscv32-jyd`. It is intended first
-for `I` tests and for extensions whose instructions are accepted by
-`${JYD_AM_HOME}/scripts/riscv32-jyd.mk`. If an extension fails to assemble,
-check that the AM `-march` string supports it before treating the failure as a
-DUT failure.
+The implemented compatibility targets are `riscv32-jyd` and `riscv32-nemu`.
+They are intended first for `I` tests and for extensions whose instructions are
+accepted by the matching `${JYD_AM_HOME}/scripts/<ARCH>.mk`. If an extension
+fails to assemble, check that the AM `-march` string supports it before
+treating the failure as a DUT failure.

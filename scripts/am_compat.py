@@ -15,14 +15,29 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_JYD_AM_HOME = Path("/home/wuser/gitclones/jyd/abstract-machine")
-AM_INCLUDE_DIR = REPO_ROOT / "config/am/riscv32-jyd"
 WORKDIR = REPO_ROOT / "work"
 AM_WORKDIR = WORKDIR / "am-compat"
-AM_CONFIG_WORKDIR = WORKDIR / "am-riscv32-jyd"
-LINKER_SCRIPT = AM_INCLUDE_DIR / "link.ld"
 
 MARCH_RE = re.compile(r"^# MARCH:\s*(\S+)", re.MULTILINE)
 TEST_FLEN_RE = re.compile(r"^#\s+FLEN:\s*(\d+)", re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class ArchConfig:
+    name: str
+    xlen: int
+
+    @property
+    def include_dir(self) -> Path:
+        return REPO_ROOT / "config/am" / self.name
+
+    @property
+    def workdir(self) -> Path:
+        return WORKDIR / f"am-{self.name}"
+
+    @property
+    def linker_script(self) -> Path:
+        return self.include_dir / "link.ld"
 
 
 @dataclass(frozen=True)
@@ -48,6 +63,12 @@ class TestCase:
         return self.name.removeprefix(prefix)
 
 
+SUPPORTED_ARCHES = {
+    "riscv32-jyd": ArchConfig(name="riscv32-jyd", xlen=32),
+    "riscv32-nemu": ArchConfig(name="riscv32-nemu", xlen=32),
+}
+
+
 def split_words(value: str) -> list[str]:
     return [item for item in value.split() if item]
 
@@ -64,7 +85,7 @@ def discover_tests(test_isa: list[str]) -> list[TestCase]:
     for extension in test_isa:
         test_dir = REPO_ROOT / "tests/rv32i" / extension
         if not test_dir.is_dir():
-            raise SystemExit(f"Unsupported TEST_ISA entry for riscv32-jyd: {extension}")
+            raise SystemExit(f"Unsupported TEST_ISA entry: {extension}")
         tests.extend(TestCase(extension, path) for path in sorted(test_dir.glob("*.S")))
     return tests
 
@@ -144,12 +165,12 @@ def require_exe(name: str) -> str:
     return exe
 
 
-def generate_signature(test: TestCase) -> None:
+def generate_signature(test: TestCase, config: ArchConfig) -> None:
     march, test_flen = test_metadata(test)
     compiler = require_exe("riscv32-unknown-linux-gnu-gcc")
     sail = require_exe("sail_riscv_sim")
 
-    build_base = AM_CONFIG_WORKDIR / "build" / test.build_rel
+    build_base = config.workdir / "build" / test.build_rel
     build_base.parent.mkdir(parents=True, exist_ok=True)
     sig_elf = build_base.with_suffix(".sig.elf")
     sig_file = build_base.with_suffix(".sig")
@@ -157,9 +178,9 @@ def generate_signature(test: TestCase) -> None:
 
     compile_cmd = [
         compiler,
-        f"-I{AM_INCLUDE_DIR}",
+        f"-I{config.include_dir}",
         f"-I{REPO_ROOT / 'tests/env'}",
-        f"-T{LINKER_SCRIPT}",
+        f"-T{config.linker_script}",
         "-O0",
         "-g",
         "-mcmodel=medany",
@@ -169,7 +190,7 @@ def generate_signature(test: TestCase) -> None:
         f"-march={march}",
         "-mabi=ilp32",
         "-DSIGNATURE",
-        "-DXLEN=32",
+        f"-DXLEN={config.xlen}",
         f"-DTEST_FLEN={test_flen}",
         str(test.path),
     ]
@@ -177,7 +198,7 @@ def generate_signature(test: TestCase) -> None:
 
     sail_cmd = [
         sail,
-        "--rv32",
+        f"--rv{config.xlen}",
         f"--test-signature={sig_file}",
         "--signature-granularity",
         "4",
@@ -186,12 +207,12 @@ def generate_signature(test: TestCase) -> None:
     with sig_log.open("w") as log:
         subprocess.run(sail_cmd, cwd=REPO_ROOT, stdout=log, stderr=subprocess.STDOUT, check=True)
 
-    process_signature_file(sig_file, 32)
+    process_signature_file(sig_file, config.xlen)
 
 
-def generate_signatures(tests: list[TestCase]) -> None:
+def generate_signatures(tests: list[TestCase], config: ArchConfig) -> None:
     for test in tests:
-        generate_signature(test)
+        generate_signature(test, config)
 
 
 def write_shim() -> Path:
@@ -210,14 +231,68 @@ int main(const char *args) {
     return shim.relative_to(REPO_ROOT)
 
 
-def signature_file(test: TestCase) -> Path:
-    return AM_CONFIG_WORKDIR / "build" / test.build_rel.with_suffix(".results")
+# def write_compat_headers() -> Path:
+#     include_dir = AM_WORKDIR / "include"
+#     include_dir.mkdir(parents=True, exist_ok=True)
+#     stdio = include_dir / "stdio.h"
+#     stdio_contents = """#ifndef AM_COMPAT_STDIO_H
+# #define AM_COMPAT_STDIO_H
+#
+# #include <stdarg.h>
+# #include <stddef.h>
+#
+# int printf(const char *fmt, ...);
+# int sprintf(char *out, const char *fmt, ...);
+# int snprintf(char *out, size_t n, const char *fmt, ...);
+# int vsprintf(char *out, const char *fmt, va_list ap);
+# int vsnprintf(char *out, size_t n, const char *fmt, va_list ap);
+#
+# #endif
+# """
+#     if not stdio.exists() or stdio.read_text() != stdio_contents:
+#         stdio.write_text(stdio_contents)
+#     string = include_dir / "string.h"
+#     string_contents = """#ifndef AM_COMPAT_STRING_H
+# #define AM_COMPAT_STRING_H
+#
+# #include <stddef.h>
+#
+# void *memcpy(void *out, const void *in, size_t n);
+# void *memset(void *s, int c, size_t n);
+# void *memmove(void *dst, const void *src, size_t n);
+# int memcmp(const void *s1, const void *s2, size_t n);
+# size_t strlen(const char *s);
+# char *strcat(char *dst, const char *src);
+# char *strcpy(char *dst, const char *src);
+# char *strncpy(char *dst, const char *src, size_t n);
+# int strcmp(const char *s1, const char *s2);
+# int strncmp(const char *s1, const char *s2, size_t n);
+#
+# #endif
+# """
+#     if not string.exists() or string.read_text() != string_contents:
+#         string.write_text(string_contents)
+#     limits = include_dir / "limits.h"
+#     limits_contents = """#ifndef AM_COMPAT_LIMITS_H
+# #define AM_COMPAT_LIMITS_H
+#
+# #define CHAR_BIT __CHAR_BIT__
+#
+# #endif
+# """
+#     if not limits.exists() or limits.read_text() != limits_contents:
+#         limits.write_text(limits_contents)
+#     return include_dir
 
 
-def write_am_makefile(test: TestCase, arch: str, jyd_am_home: Path, command: str) -> Path:
+def signature_file(test: TestCase, config: ArchConfig) -> Path:
+    return config.workdir / "build" / test.build_rel.with_suffix(".results")
+
+
+def write_am_makefile(test: TestCase, config: ArchConfig, jyd_am_home: Path, command: str) -> Path:
     makefile = AM_WORKDIR / "makefiles" / f"Makefile.{test.name}"
     makefile.parent.mkdir(parents=True, exist_ok=True)
-    sig = signature_file(test)
+    sig = signature_file(test, config)
     if not sig.is_file():
         raise SystemExit(f"Missing ACT signature results for {test.name}: {sig}")
 
@@ -225,8 +300,8 @@ def write_am_makefile(test: TestCase, arch: str, jyd_am_home: Path, command: str
     contents = f"""JYD_AM_HOME ?= {jyd_am_home}
 NAME = {test.name}
 SRCS = {shim} {test.rel_path}
-INC_PATH += {REPO_ROOT / "tests/env"} {AM_INCLUDE_DIR}
-ASFLAGS += -DRVTEST_SELFCHECK -DXLEN=32 -DTEST_FLEN=32 -DSIGNATURE_FILE=\\\"{sig}\\\"
+INC_PATH += {REPO_ROOT / "tests/env"} {config.include_dir}
+ASFLAGS += -DRVTEST_SELFCHECK -DXLEN={config.xlen} -DTEST_FLEN=32 -DSIGNATURE_FILE=\\\"{sig}\\\"
 include ${{JYD_AM_HOME}}/Makefile
 """
     if not makefile.exists() or makefile.read_text() != contents:
@@ -235,10 +310,30 @@ include ${{JYD_AM_HOME}}/Makefile
 
 
 def run_am_test(test: TestCase, arch: str, jyd_am_home: Path, command: str) -> bool:
-    makefile = write_am_makefile(test, arch, jyd_am_home, command)
-    env = {**os.environ, "JYD_AM_HOME": str(jyd_am_home), "CROSS_COMPILE": "riscv32-unknown-linux-gnu-"}
+    config = SUPPORTED_ARCHES[arch]
+    makefile = write_am_makefile(test, config, jyd_am_home, command)
+    # compat_include = write_compat_headers()
+    # cpath = str(compat_include)
+    cpath = ""
+    if os.environ.get("CPATH"):
+        # cpath = f"{cpath}{os.pathsep}{os.environ['CPATH']}"
+        cpath = f"{os.pathsep}{os.environ['CPATH']}"
+    env = {
+        **os.environ,
+        "JYD_AM_HOME": str(jyd_am_home),
+        "CROSS_COMPILE": "riscv32-unknown-linux-gnu-",
+        "CPATH": cpath,
+    }
     result = subprocess.run(
-        ["make", "-s", "-f", str(makefile), f"ARCH={arch}", "CROSS_COMPILE=riscv32-unknown-linux-gnu-", command],
+        [
+            "make",
+            "-s",
+            "-f",
+            str(makefile),
+            f"ARCH={arch}",
+            "CROSS_COMPILE=riscv32-unknown-linux-gnu-",
+            command,
+        ],
         cwd=REPO_ROOT,
         env=env,
     )
@@ -247,6 +342,9 @@ def run_am_test(test: TestCase, arch: str, jyd_am_home: Path, command: str) -> b
 
 def clean_am(arch: str) -> int:
     shutil.rmtree(AM_WORKDIR, ignore_errors=True)
+    config = SUPPORTED_ARCHES.get(arch)
+    if config is not None:
+        shutil.rmtree(config.workdir, ignore_errors=True)
     for path in (REPO_ROOT / "build").glob(f"*-{arch}*"):
         if path.is_file() or path.is_symlink():
             path.unlink()
@@ -262,8 +360,10 @@ def main() -> int:
     parser.add_argument("--exclude-test", default="")
     args = parser.parse_args()
 
-    if args.arch != "riscv32-jyd":
-        raise SystemExit(f"AM compatibility currently supports only riscv32-jyd, got {args.arch}")
+    config = SUPPORTED_ARCHES.get(args.arch)
+    if config is None:
+        supported = " ".join(sorted(SUPPORTED_ARCHES))
+        raise SystemExit(f"AM compatibility supports ARCH in {{{supported}}}, got {args.arch}")
 
     if args.command == "clean-am":
         return clean_am(args.arch)
@@ -274,7 +374,7 @@ def main() -> int:
         print("No tests selected.")
         return 0
 
-    generate_signatures(tests)
+    generate_signatures(tests, config)
 
     failed: list[TestCase] = []
     print(f"test list [{len(tests)} item(s)]:", " ".join(test.short_name for test in tests))
