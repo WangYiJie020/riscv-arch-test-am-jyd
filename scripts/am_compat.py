@@ -376,15 +376,17 @@ def main() -> int:
 
     generate_signatures(tests, config)
 
-    failed: list[TestCase] = []
+    results: list[tuple[TestCase, bool]] = []
     print(f"test list [{len(tests)} item(s)]:", " ".join(test.short_name for test in tests))
     for test in tests:
         ok = run_am_test(test, args.arch, jyd_am_home, args.command)
+        results.append((test, ok))
+
+    for test, ok in results:
         status = "PASS" if ok else "***FAIL***"
         print(f"[{test.short_name:>14}] {status}")
-        if not ok:
-            failed.append(test)
 
+    failed = [test for test, ok in results if not ok]
     return 1 if failed else 0
 
 
