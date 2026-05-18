@@ -218,75 +218,46 @@ def generate_signatures(tests: list[TestCase], config: ArchConfig) -> None:
 def write_shim() -> Path:
     shim = AM_WORKDIR / "rvtest_main.c"
     shim.parent.mkdir(parents=True, exist_ok=True)
-    contents = """extern void rvtest_entry_point(void);
-
-int main(const char *args) {
-  (void)args;
-  rvtest_entry_point();
-  return 1;
-}
+    contents = """__attribute__((used, section(".rodata.mainargs")))
+const char mainargs[64] = "the_insert-arg_rule_in_Makefile_will_insert_mainargs_here";
 """
     if not shim.exists() or shim.read_text() != contents:
         shim.write_text(contents)
     return shim.relative_to(REPO_ROOT)
 
 
-# def write_compat_headers() -> Path:
-#     include_dir = AM_WORKDIR / "include"
-#     include_dir.mkdir(parents=True, exist_ok=True)
-#     stdio = include_dir / "stdio.h"
-#     stdio_contents = """#ifndef AM_COMPAT_STDIO_H
-# #define AM_COMPAT_STDIO_H
-#
-# #include <stdarg.h>
-# #include <stddef.h>
-#
-# int printf(const char *fmt, ...);
-# int sprintf(char *out, const char *fmt, ...);
-# int snprintf(char *out, size_t n, const char *fmt, ...);
-# int vsprintf(char *out, const char *fmt, va_list ap);
-# int vsnprintf(char *out, size_t n, const char *fmt, va_list ap);
-#
-# #endif
-# """
-#     if not stdio.exists() or stdio.read_text() != stdio_contents:
-#         stdio.write_text(stdio_contents)
-#     string = include_dir / "string.h"
-#     string_contents = """#ifndef AM_COMPAT_STRING_H
-# #define AM_COMPAT_STRING_H
-#
-# #include <stddef.h>
-#
-# void *memcpy(void *out, const void *in, size_t n);
-# void *memset(void *s, int c, size_t n);
-# void *memmove(void *dst, const void *src, size_t n);
-# int memcmp(const void *s1, const void *s2, size_t n);
-# size_t strlen(const char *s);
-# char *strcat(char *dst, const char *src);
-# char *strcpy(char *dst, const char *src);
-# char *strncpy(char *dst, const char *src, size_t n);
-# int strcmp(const char *s1, const char *s2);
-# int strncmp(const char *s1, const char *s2, size_t n);
-#
-# #endif
-# """
-#     if not string.exists() or string.read_text() != string_contents:
-#         string.write_text(string_contents)
-#     limits = include_dir / "limits.h"
-#     limits_contents = """#ifndef AM_COMPAT_LIMITS_H
-# #define AM_COMPAT_LIMITS_H
-#
-# #define CHAR_BIT __CHAR_BIT__
-#
-# #endif
-# """
-#     if not limits.exists() or limits.read_text() != limits_contents:
-#         limits.write_text(limits_contents)
-#     return include_dir
-
-
 def signature_file(test: TestCase, config: ArchConfig) -> Path:
     return config.workdir / "build" / test.build_rel.with_suffix(".results")
+
+
+def sanitized_cpath() -> str | None:
+    cpath = os.environ.get("CPATH")
+    if not cpath:
+        return None
+
+    compat_include = AM_WORKDIR / "include"
+    entries: list[str] = []
+    for entry in cpath.split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            entry_path = Path(entry).expanduser().resolve()
+        except OSError:
+            entries.append(entry)
+            continue
+        if entry_path != compat_include:
+            entries.append(entry)
+    return os.pathsep.join(entries) if entries else None
+
+
+def remove_stale_compat_deps(jyd_am_home: Path) -> None:
+    compat_include = str((AM_WORKDIR / "include").resolve())
+    for dep_file in jyd_am_home.glob("*/build/**/*.d"):
+        try:
+            if compat_include in dep_file.read_text():
+                dep_file.unlink()
+        except OSError:
+            pass
 
 
 def write_am_makefile(test: TestCase, config: ArchConfig, jyd_am_home: Path, command: str) -> Path:
@@ -299,7 +270,9 @@ def write_am_makefile(test: TestCase, config: ArchConfig, jyd_am_home: Path, com
     shim = write_shim()
     contents = f"""JYD_AM_HOME ?= {jyd_am_home}
 NAME = {test.name}
-SRCS = {shim} {test.rel_path}
+SRCS = {test.rel_path} {shim}
+LD_ENTRY_POINT = rvtest_entry_point
+LDFLAGS += -u mainargs
 INC_PATH += {REPO_ROOT / "tests/env"} {config.include_dir}
 ASFLAGS += -DRVTEST_SELFCHECK -DXLEN={config.xlen} -DTEST_FLEN=32 -DSIGNATURE_FILE=\\\"{sig}\\\"
 include ${{JYD_AM_HOME}}/Makefile
@@ -312,18 +285,17 @@ include ${{JYD_AM_HOME}}/Makefile
 def run_am_test(test: TestCase, arch: str, jyd_am_home: Path, command: str) -> bool:
     config = SUPPORTED_ARCHES[arch]
     makefile = write_am_makefile(test, config, jyd_am_home, command)
-    # compat_include = write_compat_headers()
-    # cpath = str(compat_include)
-    cpath = ""
-    if os.environ.get("CPATH"):
-        # cpath = f"{cpath}{os.pathsep}{os.environ['CPATH']}"
-        cpath = f"{os.pathsep}{os.environ['CPATH']}"
+    remove_stale_compat_deps(jyd_am_home)
     env = {
         **os.environ,
         "JYD_AM_HOME": str(jyd_am_home),
         "CROSS_COMPILE": "riscv32-unknown-linux-gnu-",
-        "CPATH": cpath,
     }
+    cpath = sanitized_cpath()
+    if cpath is None:
+        env.pop("CPATH", None)
+    else:
+        env["CPATH"] = cpath
     result = subprocess.run(
         [
             "make",
